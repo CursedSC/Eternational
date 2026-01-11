@@ -1,0 +1,11 @@
+"Fantasy RP"
+{
+	"base"		"base"
+    "title"  "Fantasy RP"
+    "version"   "1.0"
+    "menusystem"	"1"
+
+    "author_team"   ""
+		"author_name"   "Сасный парень"
+
+}
