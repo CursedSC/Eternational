@@ -3,22 +3,45 @@ AddCSLuaFile()
 util.AddNetworkString("fighting.Block.Update")
 util.AddNetworkString("fighting.Block.Start")
 util.AddNetworkString("fighting.Block.Stop")
-util.AddNetworkString("fighting.Block.UpdateState")
 
 local BLOCK_DURABILITY_PERCENT = 0.5
 local BLOCK_SPEED_MULT = 0.75
 local PARRY_WINDOW = 0.3
 local PARRY_COOLDOWN = 5
-local BLOCK_REGEN_RATE = 2
-local BLOCK_REGEN_DELAY = 2
+
+local STAMINA_MAX = 100
+local STAMINA_HIT_COST = 0.15 -- 15% за блок
+local STAMINA_REGEN_RATE = 8  -- в секунду
+local STAMINA_REGEN_DELAY = 2 -- после последнего блока
 
 local PMETA = FindMetaTable("Player")
 
-function PMETA:InitBlockDurability()
+--============================--
+-- СТАТЫ БЛОКА/СТАМИНЫ         --
+--============================--
+
+function PMETA:InitBlockStats()
     if not self.BlockMaxDurability then
         self.BlockMaxDurability = math.floor(self:Health() * BLOCK_DURABILITY_PERCENT)
-        self.BlockDurability = self.BlockMaxDurability
     end
+
+    if not self.BlockStaminaMax then
+        self.BlockStaminaMax = STAMINA_MAX
+    end
+
+    if self.BlockStamina == nil then
+        self.BlockStamina = self.BlockStaminaMax
+    end
+
+    self:RecalcShieldFromStamina()
+end
+
+function PMETA:RecalcShieldFromStamina()
+    local stamMax = self.BlockStaminaMax or STAMINA_MAX
+    local stam = math.Clamp(self.BlockStamina or 0, 0, stamMax)
+    local frac = stamMax > 0 and (stam / stamMax) or 0
+
+    self.BlockDurability = math.floor((self.BlockMaxDurability or 0) * frac)
     self:SyncBlockDurability()
 end
 
@@ -30,17 +53,6 @@ function PMETA:GetBlockMaxDurability()
     return self.BlockMaxDurability or 1
 end
 
-function PMETA:DamageBlockDurability(dmg)
-    if not self.BlockDurability then return end
-    self.BlockDurability = math.max(0, self.BlockDurability - dmg)
-    self.LastBlockDamageTime = CurTime()
-    self:SyncBlockDurability()
-
-    if self.BlockDurability <= 0 then
-        self:StopBlocking(true)
-    end
-end
-
 function PMETA:SyncBlockDurability()
     net.Start("fighting.Block.Update")
     net.WriteFloat(self:GetBlockDurability())
@@ -48,12 +60,25 @@ function PMETA:SyncBlockDurability()
     net.Send(self)
 end
 
-function PMETA:SyncBlockState(state)
-    net.Start("fighting.Block.UpdateState")
-    net.WriteEntity(self)
-    net.WriteBool(state)
-    net.Broadcast()
+function PMETA:ConsumeBlockStamina(percent)
+    if not self.BlockStaminaMax then return end
+
+    local maxStam = self.BlockStaminaMax
+    local cost = maxStam * (percent or 0)
+
+    self.BlockStamina = math.max(0, (self.BlockStamina or maxStam) - cost)
+    self.LastBlockDamageTime = CurTime()
+
+    self:RecalcShieldFromStamina()
+
+    if self.BlockStamina <= 0 then
+        self:StopBlocking(true)
+    end
 end
+
+--============================--
+-- БЛОК / ПАРРИ                --
+--============================--
 
 function PMETA:StartBlocking()
     if self.IsBlocking then return end
@@ -64,15 +89,16 @@ function PMETA:StartBlocking()
     local wep = self:GetActiveWeapon()
     if not wep.CanBlock then return end
 
-    self:InitBlockDurability()
+    self:InitBlockStats()
 
-    if self.BlockDurability <= 0 then
+    if (self.BlockStamina or 0) <= 0 then
         self:EmitSound("physics/metal/metal_sheet_impact_soft2.wav")
         return
     end
 
     self.IsBlocking = true
     self.BlockStartTime = CurTime()
+
     self.BaseRunSpeed = self:GetRunSpeed()
     self.BaseWalkSpeed = self:GetWalkSpeed()
 
@@ -85,7 +111,6 @@ function PMETA:StartBlocking()
 
     net.Start("fighting.Block.Start")
     net.Send(self)
-    self:SyncBlockState(true)
 
     self:EmitSound("weapons/ar2/ar2_reload_rotate.wav", 60, 120)
 end
@@ -109,7 +134,6 @@ function PMETA:StopBlocking(broken)
 
     net.Start("fighting.Block.Stop")
     net.Send(self)
-    self:SyncBlockState(false)
 
     if broken then
         self:EmitSound("physics/metal/metal_box_break1.wav", 70, 90)
@@ -128,6 +152,7 @@ function PMETA:IsAttackInFront(attackerPos)
     local plyPos = self:GetPos()
     local plyForward = self:GetForward()
     local toAttacker = (attackerPos - plyPos):GetNormalized()
+
     toAttacker.z = 0
     plyForward.z = 0
     plyForward:Normalize()
@@ -136,35 +161,9 @@ function PMETA:IsAttackInFront(attackerPos)
     return dot > 0.3
 end
 
-hook.Add("Think", "fighting.Block.Regen", function()
-    for _, ply in ipairs(player.GetAll()) do
-        if not ply.BlockDurability or not ply.BlockMaxDurability then continue end
-        if ply.IsBlocking then continue end
-        if ply.LastBlockDamageTime and (CurTime() - ply.LastBlockDamageTime) < BLOCK_REGEN_DELAY then continue end
-
-        if ply.BlockDurability < ply.BlockMaxDurability then
-            ply.BlockDurability = math.min(ply.BlockMaxDurability, ply.BlockDurability + (BLOCK_REGEN_RATE * FrameTime()))
-
-            if (ply.NextBlockSync or 0) < CurTime() then
-                ply:SyncBlockDurability()
-                ply.NextBlockSync = CurTime() + 1
-            end
-        end
-    end
-end)
-
--- Жёсткий запрет атаки во время блока
-hook.Add("Think", "fighting.Block.WeaponLock", function()
-    for _, ply in ipairs(player.GetAll()) do
-        if not ply.IsBlocking then continue end
-
-        local wep = ply:GetActiveWeapon()
-        if not IsValid(wep) then continue end
-
-        wep:SetNextPrimaryFire(CurTime() + 0.2)
-        wep:SetNextSecondaryFire(CurTime() + 0.2)
-    end
-end)
+--============================--
+-- ХУКИ                        --
+--============================--
 
 hook.Add("KeyPress", "fighting.Block.KeyPress", function(ply, key)
     if key == IN_ATTACK2 then
@@ -182,8 +181,43 @@ hook.Add("PlayerDeath", "fighting.Block.Death", function(ply)
     if ply.IsBlocking then
         ply:StopBlocking(false)
     end
+
     ply.BlockDurability = nil
     ply.BlockMaxDurability = nil
+    ply.BlockStamina = nil
+    ply.BlockStaminaMax = nil
+end)
+
+-- Реген стамины блока
+hook.Add("Think", "fighting.Block.StaminaRegen", function()
+    for _, ply in ipairs(player.GetAll()) do
+        if not ply.BlockStaminaMax then continue end
+        if ply.IsBlocking then continue end
+
+        if ply.LastBlockDamageTime and (CurTime() - ply.LastBlockDamageTime) < STAMINA_REGEN_DELAY then
+            continue
+        end
+
+        local cur = ply.BlockStamina or ply.BlockStaminaMax
+        if cur < ply.BlockStaminaMax then
+            cur = math.min(ply.BlockStaminaMax, cur + STAMINA_REGEN_RATE * FrameTime())
+            ply.BlockStamina = cur
+            ply:RecalcShieldFromStamina()
+        end
+    end
+end)
+
+-- Жесткий запрет атаки во время блока
+hook.Add("Think", "fighting.Block.WeaponLock", function()
+    for _, ply in ipairs(player.GetAll()) do
+        if not ply.IsBlocking then continue end
+
+        local wep = ply:GetActiveWeapon()
+        if not IsValid(wep) then continue end
+
+        wep:SetNextPrimaryFire(CurTime() + 0.2)
+        wep:SetNextSecondaryFire(CurTime() + 0.2)
+    end
 end)
 
 hook.Add("EntityTakeDamage", "fighting.Block.Damage", function(target, dmginfo)
@@ -215,7 +249,8 @@ hook.Add("EntityTakeDamage", "fighting.Block.Damage", function(target, dmginfo)
             end
         end
     else
-        target:DamageBlockDurability(damage)
+        -- 1 блок = 15% стамины, независимо от урона
+        target:ConsumeBlockStamina(STAMINA_HIT_COST)
         dmginfo:SetDamage(0)
 
         target:EmitSound("physics/metal/metal_box_impact_hard" .. math.random(1,3) .. ".wav", 70, math.random(95, 105))
@@ -228,7 +263,7 @@ end)
 hook.Add("PlayerSpawn", "fighting.Block.Spawn", function(ply)
     timer.Simple(0.1, function()
         if IsValid(ply) then
-            ply:InitBlockDurability()
+            ply:InitBlockStats()
         end
     end)
 end)
