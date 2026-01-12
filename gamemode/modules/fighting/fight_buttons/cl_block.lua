@@ -18,37 +18,47 @@ net.Receive("fighting.Block.Stop", function()
     isBlocking = false
 end)
 
--- Иконка на теле локального игрока (проекция в экранные координаты)
-hook.Add("HUDPaint", "fighting.Block.HUD.Local", function()
-    if not isBlocking then return end
+local function ShouldDrawShield()
+    if not isBlocking then return false end
+    if blockMaxDurability <= 0 then return false end
+    local ply = LocalPlayer()
+    if not IsValid(ply) or not ply:Alive() then return false end
+    return true
+end
+
+hook.Add("PostDrawTranslucentRenderables", "fighting.Block.WorldIcon", function(depth, skybox)
+    if skybox then return end
+    if not ShouldDrawShield() then return end
 
     local ply = LocalPlayer()
-    if not IsValid(ply) or not ply:Alive() then return end
-    if blockMaxDurability <= 0 then return end
+    local staminaPercent = math.Clamp(blockDurability / blockMaxDurability, 0, 1)
+    if staminaPercent <= 0 then return end
 
-    local worldPos = ply:GetPos() + Vector(0, 0, 60)
-    local screenPos = worldPos:ToScreen()
+    local pos = ply:GetPos() + Vector(0, 0, 72)
 
-    if not screenPos.visible then return end
+    local ang = EyeAngles()
+    ang:RotateAroundAxis(ang:Right(), 90)
+    ang:RotateAroundAxis(ang:Up(), -90)
 
-    local iconSize = 64
-    local x = screenPos.x - iconSize * 0.5
-    local y = screenPos.y - iconSize * 0.5
+    local scaleMul = 0.6 + 0.4 * staminaPercent
+    local baseSize = 24
+    local iconSize = baseSize * scaleMul
 
-    local durabilityPercent = math.Clamp(blockDurability / blockMaxDurability, 0, 1)
+    cam.Start3D2D(pos, ang, 0.08)
+        local x = -iconSize * 0.5
+        local y = -iconSize * 0.5
 
-    surface.SetDrawColor(255, 255, 255, 255)
-    surface.SetMaterial(shieldEmpty)
-    surface.DrawTexturedRect(x, y, iconSize, iconSize)
+        surface.SetDrawColor(255, 255, 255, 255)
+        surface.SetMaterial(shieldEmpty)
+        surface.DrawTexturedRect(x, y, iconSize, iconSize)
 
-    if durabilityPercent > 0 then
         surface.SetDrawColor(255, 255, 255, 255)
         surface.SetMaterial(shieldFull)
 
-        local vStart = 1 - durabilityPercent
+        local vStart = 1 - staminaPercent
         local drawY = y + (iconSize * vStart)
-        local drawH = iconSize * durabilityPercent
+        local drawH = iconSize * staminaPercent
 
         surface.DrawTexturedRectUV(x, drawY, iconSize, drawH, 0, vStart, 1, 1)
-    end
+    cam.End3D2D()
 end)
