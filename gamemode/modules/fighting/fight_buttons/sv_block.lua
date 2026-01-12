@@ -3,17 +3,23 @@ AddCSLuaFile()
 util.AddNetworkString("fighting.Block.Update")
 util.AddNetworkString("fighting.Block.Start")
 util.AddNetworkString("fighting.Block.Stop")
+util.AddNetworkString("fighting.Block.UpdateState") -- Для синхронизации визуализации другим игрокам
 
 local BLOCK_DURABILITY_PERCENT = 0.5
 local BLOCK_SPEED_MULT = 0.75
 local PARRY_WINDOW = 0.3
 local PARRY_COOLDOWN = 5
+local BLOCK_REGEN_RATE = 2 -- Единиц в секунду
+local BLOCK_REGEN_DELAY = 2 -- Задержка перед регеном после получения урона
 
 local PMETA = FindMetaTable("Player")
 
 function PMETA:InitBlockDurability()
-    self.BlockDurability = math.floor(self:Health() * BLOCK_DURABILITY_PERCENT)
-    self.BlockMaxDurability = self.BlockDurability
+    -- Инициализируем только если нет (чтобы не сбрасывать текущий реген)
+    if not self.BlockMaxDurability then
+        self.BlockMaxDurability = math.floor(self:Health() * BLOCK_DURABILITY_PERCENT)
+        self.BlockDurability = self.BlockMaxDurability
+    end
     self:SyncBlockDurability()
 end
 
@@ -28,6 +34,7 @@ end
 function PMETA:DamageBlockDurability(dmg)
     if not self.BlockDurability then return end
     self.BlockDurability = math.max(0, self.BlockDurability - dmg)
+    self.LastBlockDamageTime = CurTime()
     self:SyncBlockDurability()
     
     if self.BlockDurability <= 0 then
@@ -42,15 +49,31 @@ function PMETA:SyncBlockDurability()
     net.Send(self)
 end
 
+function PMETA:SyncBlockState(state)
+    net.Start("fighting.Block.UpdateState")
+    net.WriteEntity(self)
+    net.WriteBool(state)
+    net.Broadcast()
+end
+
 function PMETA:StartBlocking()
     if self.IsBlocking then return end
     if not IsValid(self:GetActiveWeapon()) then return end
     
+    -- Проверка кулдауна после поломки
+    if self:HasCooldown(SKILL_BLOCK) then return end
+
     local wep = self:GetActiveWeapon()
     if not wep.CanBlock then return end
     
     self:InitBlockDurability()
     
+    -- Если прочности нет, блокировать нельзя
+    if self.BlockDurability <= 0 then 
+        self:EmitSound("physics/metal/metal_sheet_impact_soft2.wav")
+        return 
+    end
+
     self.IsBlocking = true
     self.BlockStartTime = CurTime()
     self.BaseSpeed = self:GetRunSpeed()
@@ -64,6 +87,7 @@ function PMETA:StartBlocking()
     
     net.Start("fighting.Block.Start")
     net.Send(self)
+    self:SyncBlockState(true)
     
     self:EmitSound("weapons/ar2/ar2_reload_rotate.wav", 60, 120)
 end
@@ -72,8 +96,7 @@ function PMETA:StopBlocking(broken)
     if not self.IsBlocking then return end
     
     self.IsBlocking = false
-    self.BlockDurability = nil
-    self.BlockMaxDurability = nil
+    -- Не сбрасываем Durability здесь, чтобы она могла регениться
     
     if self.BaseSpeed then
         self:SetRunSpeed(self.BaseSpeed)
@@ -87,10 +110,12 @@ function PMETA:StopBlocking(broken)
     
     net.Start("fighting.Block.Stop")
     net.Send(self)
+    self:SyncBlockState(false)
     
     if broken then
         self:EmitSound("physics/metal/metal_box_break1.wav", 70, 90)
         self:AddCooldown(SKILL_BLOCK, 3)
+        -- Сброс в 0 при поломке уже произошел в DamageBlockDurability
     else
         self:EmitSound("weapons/ar2/ar2_reload_push.wav", 60, 100)
     end
@@ -113,6 +138,46 @@ function PMETA:IsAttackInFront(attackerPos)
     return dot > 0.3
 end
 
+-- Регенерация блока
+hook.Add("Think", "fighting.Block.Regen", function()
+    for _, ply in ipairs(player.GetAll()) do
+        if not ply.BlockDurability or not ply.BlockMaxDurability then continue end
+        
+        -- Не регеним во время блока
+        if ply.IsBlocking then continue end
+        
+        -- Проверка задержки после получения урона
+        if ply.LastBlockDamageTime and (CurTime() - ply.LastBlockDamageTime) < BLOCK_REGEN_DELAY then continue end
+        
+        if ply.BlockDurability < ply.BlockMaxDurability then
+            -- Медленный реген
+            ply.BlockDurability = math.min(ply.BlockMaxDurability, ply.BlockDurability + (BLOCK_REGEN_RATE * FrameTime()))
+            
+            -- Синхронизируем не каждый кадр, а периодически, например раз в секунду или при значительном изменении
+            -- Для плавности на клиенте можно интерполировать, но пока сделаем простую синхронизацию
+            if (ply.NextBlockSync or 0) < CurTime() then
+                ply:SyncBlockDurability()
+                ply.NextBlockSync = CurTime() + 1
+            end
+        end
+    end
+end)
+
+-- Блокировка атаки во время блока
+hook.Add("PlayerCanAttack", "fighting.Block.PreventAttack", function(ply)
+    if ply.IsBlocking then return false end
+end)
+
+-- Также хук в SetupMove для надежности (если оружие использует primary attack)
+hook.Add("SetupMove", "fighting.Block.PreventMoveAttack", function(ply, mv, cmd)
+    if ply.IsBlocking then
+        if mv:KeyPressed(IN_ATTACK) then
+            mv:SetButtons(bit.band(mv:GetButtons(), bit.bnot(IN_ATTACK)))
+        end
+    end
+end)
+
+
 hook.Add("KeyPress", "fighting.Block.KeyPress", function(ply, key)
     if key == IN_ATTACK2 then
         ply:StartBlocking()
@@ -129,6 +194,9 @@ hook.Add("PlayerDeath", "fighting.Block.Death", function(ply)
     if ply.IsBlocking then
         ply:StopBlocking(false)
     end
+    -- Сброс статов при смерти
+    ply.BlockDurability = nil
+    ply.BlockMaxDurability = nil
 end)
 
 hook.Add("EntityTakeDamage", "fighting.Block.Damage", function(target, dmginfo)
@@ -173,7 +241,7 @@ end)
 hook.Add("PlayerSpawn", "fighting.Block.Spawn", function(ply)
     timer.Simple(0.1, function()
         if IsValid(ply) then
-            ply:SyncBlockDurability()
+            ply:InitBlockDurability()
         end
     end)
 end)
