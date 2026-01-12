@@ -27,25 +27,36 @@ hook.Add("HUDPaint", "fighting.Block.HUD", function()
     
     local sw, sh = ScrW(), ScrH()
     local iconSize = 64
+    
+    -- Центр экрана (чуть ниже прицела, чтобы не перекрывать обзор)
     local x = sw * 0.5 - iconSize * 0.5
-    local y = sh * 0.7
+    local y = sh * 0.5 + 30 
     
-    local durabilityPercent = blockDurability / blockMaxDurability
+    local durabilityPercent = math.Clamp(blockDurability / blockMaxDurability, 0, 1)
     
-    surface.SetDrawColor(255, 255, 255, 255)
+    -- 1. Рисуем "пустой" щит (фон)
+    surface.SetDrawColor(255, 255, 255, 200)
     surface.SetMaterial(shieldEmpty)
     surface.DrawTexturedRect(x, y, iconSize, iconSize)
     
-    surface.SetDrawColor(255, 255, 255, 255 * durabilityPercent)
-    surface.SetMaterial(shieldFull)
-    surface.DrawTexturedRect(x, y, iconSize, iconSize)
+    -- 2. Рисуем "полный" щит с обрезкой по высоте (эффект убывания вниз)
+    -- Используем ScissorRect для обрезки части текстуры
+    local clipHeight = iconSize * durabilityPercent
+    local clipY = y + (iconSize - clipHeight)
     
+    render.SetScissorRect(x, clipY, x + iconSize, y + iconSize, true)
+        surface.SetDrawColor(255, 255, 255, 255)
+        surface.SetMaterial(shieldFull)
+        surface.DrawTexturedRect(x, y, iconSize, iconSize)
+    render.SetScissorRect(0, 0, 0, 0, false)
+    
+    -- Текст прочности
     draw.SimpleText(
         math.floor(blockDurability),
         "DermaDefault",
         sw * 0.5,
-        y + iconSize + 10,
-        Color(255, 255, 255, 255),
+        y + iconSize + 2,
+        Color(255, 255, 255, 200),
         TEXT_ALIGN_CENTER,
         TEXT_ALIGN_TOP
     )
